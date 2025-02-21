@@ -1223,3 +1223,14 @@ static bool trans_csrrci(DisasContext *ctx, arg_csrrci * a)
                              ctx->zero, ctx->zero, mask, ctx->zero);
     }
 }
+
+static bool trans_squash(DisasContext *ctx, arg_squash *a)
+{
+    TCGv src1 = get_gpr(ctx, a->rs1, EXT_NONE);
+    TCGv dst = dest_gpr(ctx, a->rd);
+
+    tcg_gen_mul_tl(dst, src1, src1);
+    gen_set_gpr(ctx, a->rd, dst);
+
+    return true;
+}

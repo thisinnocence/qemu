@@ -238,6 +238,11 @@ divuw    0000001 .....  ..... 101 ..... 0111011 @r
 remw     0000001 .....  ..... 110 ..... 0111011 @r
 remuw    0000001 .....  ..... 111 ..... 0111011 @r
 
+# add a custom insn, calculate squash
+&squash rs1 rd
+@squash ....... ..... ..... ... ..... ....... &squash %rs1 %rd
+squash  0000110 00000 ..... 110 ..... 1111011 @squash
+
 # *** RV128M Standard Extension (in addition to RV64M) ***
 muld     0000001 .....  ..... 000 ..... 1111011 @r
 divd     0000001 .....  ..... 100 ..... 1111011 @r
