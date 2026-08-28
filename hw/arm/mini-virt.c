@@ -12,19 +12,21 @@
 #include "hw/arm/boot.h"
 #include "hw/intc/arm_gicv3_common.h"
 #include "hw/char/pl011.h"
+#include "hw/misc/sec.h"
 #include "target/arm/cpu.h"
 #include "hw/arm/machines-qom.h"
 
 
 #define NUM_IRQS 256  // Number of external interrupt lines to configure the GIC with
 
-enum {VIRT_MEM, VIRT_UART, VIRT_GIC_DIST, VIRT_GIC_REDIST};
+enum {VIRT_MEM, VIRT_UART, VIRT_GIC_DIST, VIRT_GIC_REDIST, VIRT_SEC};
 
 static MemMapEntry memmap[] = {
     [VIRT_MEM]        = { GiB, 4 * GiB},
     [VIRT_UART]       = { 0x09000000, 0x00001000 },
     [VIRT_GIC_DIST]   = { 0x08000000, 0x00010000 },
     [VIRT_GIC_REDIST] = { 0x080A0000, 0x00F60000 },
+    [VIRT_SEC]        = { 0x0A000000, 0x00000400 },
 };
 
 static const int irqmap[] = {
@@ -111,6 +113,12 @@ static void create_uart(const MiniVirtMachineState *vms, MemoryRegion *sysmem)
     sysbus_connect_irq(s, 0, qdev_get_gpio_in(vms->gic, irq));
 }
 
+static void create_sec(const MiniVirtMachineState *vms)
+{
+    /* sec 是无中断的 MMIO 设备，由 mini-virt 固定映射其 register 空间 */
+    sysbus_create_simple(TYPE_SEC_DEVICE, vms->memmap[VIRT_SEC].base, NULL);
+}
+
 static const CPUArchIdList *virt_possible_cpu_arch_ids(MachineState *ms)
 {
     unsigned int max_cpus = ms->smp.max_cpus;
@@ -149,6 +157,7 @@ static void mach_virt_init(MachineState *machine)
     create_ram(vms, sysmem);
     create_gic(vms, sysmem);
     create_uart(vms, sysmem);
+    create_sec(vms);
 
     vms->bootinfo.ram_size = machine->ram_size;
     vms->bootinfo.loader_start = vms->memmap[VIRT_MEM].base;
