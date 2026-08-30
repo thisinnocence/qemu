@@ -30,7 +30,8 @@ static MemMapEntry memmap[] = {
 };
 
 static const int irqmap[] = {
-    [VIRT_UART] = 1
+    [VIRT_UART] = 1,
+    [VIRT_SEC] = 2,
 };
 
 struct MiniVirtMachineClass {
@@ -115,8 +116,13 @@ static void create_uart(const MiniVirtMachineState *vms, MemoryRegion *sysmem)
 
 static void create_sec(const MiniVirtMachineState *vms)
 {
-    /* sec 是无中断的 MMIO 设备，由 mini-virt 固定映射其 register 空间 */
-    sysbus_create_simple(TYPE_SEC_DEVICE, vms->memmap[VIRT_SEC].base, NULL);
+    /*
+     * qdev_get_gpio_in 获取 GIC 的 SPI 2 input sink
+     * sysbus_create_simple 封装 device create/realize、MMIO region 0 映射和 IRQ output 0 连接
+     * level-high 的拉高和撤销仍由 sec register model 调用 qemu_set_irq 控制
+     */
+    sysbus_create_simple(TYPE_SEC_DEVICE, vms->memmap[VIRT_SEC].base,
+                         qdev_get_gpio_in(vms->gic, vms->irqmap[VIRT_SEC]));
 }
 
 static const CPUArchIdList *virt_possible_cpu_arch_ids(MachineState *ms)
