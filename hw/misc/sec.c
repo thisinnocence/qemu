@@ -1,7 +1,8 @@
 /*
- * 简单的 XOR MMIO 设备
+ * 简单的 XOR 和 DMA MMIO 设备
  *
- * 软件写入 DATA1 和 DATA2 后向 CMD 写 1 计算异或结果并触发中断，向 CMD 写 0 清零结果
+ * PIO path 计算 XOR
+ * DMA path 经 machine 提供的 AddressSpace 复制小块数据
  */
 
 #include "qemu/osdep.h"
@@ -12,6 +13,7 @@
 #include "hw/irq.h"
 #include "hw/misc/sec.h"
 #include "hw/sysbus.h"
+#include "system/dma.h"
 
 #define SEC_MMIO_SIZE 0x400
 
@@ -20,8 +22,18 @@
 #define SEC_CMD    0x08
 #define SEC_RESULT 0x0c
 #define SEC_IRQ_STATUS 0x10
+#define SEC_DMA_SRC_LO 0x14
+#define SEC_DMA_SRC_HI 0x18
+#define SEC_DMA_DST_LO 0x1c
+#define SEC_DMA_DST_HI 0x20
+#define SEC_DMA_LEN 0x24
+#define SEC_DMA_CMD 0x28
+#define SEC_DMA_STATUS 0x2c
 
 #define SEC_IRQ_PENDING BIT(0)
+#define SEC_DMA_DONE BIT(0)
+#define SEC_DMA_ERROR BIT(1)
+#define SEC_DMA_MAX_LEN 256
 
 typedef struct SecState {
     SysBusDevice parent_obj;
@@ -32,9 +44,48 @@ typedef struct SecState {
     uint32_t cmd;
     uint32_t result;
     uint32_t irq_status;
+    uint64_t dma_src;
+    uint64_t dma_dst;
+    uint32_t dma_len;
+    uint32_t dma_cmd;
+    uint32_t dma_status;
+    AddressSpace *dma_as;
 } SecState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(SecState, SEC_DEVICE)
+
+void sec_set_dma_address_space(DeviceState *dev, AddressSpace *as)
+{
+    SEC_DEVICE(dev)->dma_as = as;
+}
+
+static void sec_dma_copy(SecState *s)
+{
+    g_autofree uint8_t *buf = NULL;
+    MemTxResult result;
+
+    s->dma_status = 0;
+    if (!s->dma_as || !s->dma_len || s->dma_len > SEC_DMA_MAX_LEN) {
+        s->dma_status = SEC_DMA_ERROR;
+        goto out;
+    }
+
+    buf = g_malloc(s->dma_len);
+    result = dma_memory_read(s->dma_as, s->dma_src, buf, s->dma_len,
+                             MEMTXATTRS_UNSPECIFIED);
+    if (result != MEMTX_OK) {
+        s->dma_status = SEC_DMA_ERROR;
+        goto out;
+    }
+
+    result = dma_memory_write(s->dma_as, s->dma_dst, buf, s->dma_len,
+                              MEMTXATTRS_UNSPECIFIED);
+    s->dma_status = result == MEMTX_OK ? SEC_DMA_DONE : SEC_DMA_ERROR;
+
+out:
+    s->irq_status |= SEC_IRQ_PENDING;
+    qemu_set_irq(s->irq, 1);
+}
 
 static uint64_t sec_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -51,6 +102,20 @@ static uint64_t sec_read(void *opaque, hwaddr offset, unsigned size)
         return s->result;
     case SEC_IRQ_STATUS:
         return s->irq_status;
+    case SEC_DMA_SRC_LO:
+        return extract64(s->dma_src, 0, 32);
+    case SEC_DMA_SRC_HI:
+        return extract64(s->dma_src, 32, 32);
+    case SEC_DMA_DST_LO:
+        return extract64(s->dma_dst, 0, 32);
+    case SEC_DMA_DST_HI:
+        return extract64(s->dma_dst, 32, 32);
+    case SEC_DMA_LEN:
+        return s->dma_len;
+    case SEC_DMA_CMD:
+        return s->dma_cmd;
+    case SEC_DMA_STATUS:
+        return s->dma_status;
     default:
         /* 保留寄存器读取为 0，便于后续扩展 register 空间 */
         return 0;
@@ -88,6 +153,30 @@ static void sec_write(void *opaque, hwaddr offset, uint64_t value,
         s->irq_status &= ~(value & SEC_IRQ_PENDING);
         qemu_set_irq(s->irq, !!s->irq_status);
         break;
+    case SEC_DMA_SRC_LO:
+        s->dma_src = deposit64(s->dma_src, 0, 32, value);
+        break;
+    case SEC_DMA_SRC_HI:
+        s->dma_src = deposit64(s->dma_src, 32, 32, value);
+        break;
+    case SEC_DMA_DST_LO:
+        s->dma_dst = deposit64(s->dma_dst, 0, 32, value);
+        break;
+    case SEC_DMA_DST_HI:
+        s->dma_dst = deposit64(s->dma_dst, 32, 32, value);
+        break;
+    case SEC_DMA_LEN:
+        s->dma_len = value;
+        break;
+    case SEC_DMA_CMD:
+        s->dma_cmd = value;
+        if (s->dma_cmd == 1) {
+            sec_dma_copy(s);
+        }
+        break;
+    case SEC_DMA_STATUS:
+        s->dma_status &= ~value;
+        break;
     default:
         /* 1 KB 空间中的其余地址保留，忽略软件写入 */
         break;
@@ -114,6 +203,11 @@ static void sec_reset(DeviceState *dev)
     s->cmd = 0;
     s->result = 0;
     s->irq_status = 0;
+    s->dma_src = 0;
+    s->dma_dst = 0;
+    s->dma_len = 0;
+    s->dma_cmd = 0;
+    s->dma_status = 0;
     qemu_set_irq(s->irq, 0);
 }
 
@@ -127,7 +221,7 @@ static int sec_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_sec = {
     .name = TYPE_SEC_DEVICE,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = sec_post_load,
     .fields = (const VMStateField[]) {
@@ -136,6 +230,11 @@ static const VMStateDescription vmstate_sec = {
         VMSTATE_UINT32(cmd, SecState),
         VMSTATE_UINT32(result, SecState),
         VMSTATE_UINT32_V(irq_status, SecState, 2),
+        VMSTATE_UINT64_V(dma_src, SecState, 3),
+        VMSTATE_UINT64_V(dma_dst, SecState, 3),
+        VMSTATE_UINT32_V(dma_len, SecState, 3),
+        VMSTATE_UINT32_V(dma_cmd, SecState, 3),
+        VMSTATE_UINT32_V(dma_status, SecState, 3),
         VMSTATE_END_OF_LIST()
     },
 };

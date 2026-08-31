@@ -847,6 +847,36 @@ SMMUPciBus *smmu_find_smmu_pcibus(SMMUState *s, uint8_t bus_num)
     return NULL;
 }
 
+/*
+ * 为 system-bus master 查找或创建固定 SID 对应的 IOMMU AddressSpace
+ * PCI master 仍由 smmu_find_add_as() 根据 bus 和 devfn 创建 AddressSpace
+ */
+AddressSpace *smmu_get_address_space(SMMUState *s, uint32_t sid)
+{
+    SMMUDevice *sdev = g_hash_table_lookup(s->smmu_devices_by_sid,
+                                           GUINT_TO_POINTER(sid));
+    static unsigned int index;
+
+    if (!sdev) {
+        char *name = g_strdup_printf("%s-%u-%u", s->mrtypename, sid,
+                                     index++);
+
+        sdev = g_new0(SMMUDevice, 1);
+        sdev->smmu = s;
+        sdev->sid = sid;
+
+        memory_region_init_iommu(&sdev->iommu, sizeof(sdev->iommu),
+                                 s->mrtypename, OBJECT(s), name, UINT64_MAX);
+        address_space_init(&sdev->as, MEMORY_REGION(&sdev->iommu), name);
+        g_hash_table_insert(s->smmu_devices_by_sid, GUINT_TO_POINTER(sid),
+                            sdev);
+        trace_smmu_add_mr(name);
+        g_free(name);
+    }
+
+    return &sdev->as;
+}
+
 static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
 {
     SMMUState *s = opaque;
@@ -863,19 +893,17 @@ static AddressSpace *smmu_find_add_as(PCIBus *bus, void *opaque, int devfn)
 
     sdev = sbus->pbdev[devfn];
     if (!sdev) {
-        char *name = g_strdup_printf("%s-%d-%d", s->mrtypename, devfn, index++);
+        char *name = g_strdup_printf("%s-%d-%d", s->mrtypename, devfn,
+                                     index++);
 
         sdev = sbus->pbdev[devfn] = g_new0(SMMUDevice, 1);
-
         sdev->smmu = s;
         sdev->bus = bus;
         sdev->devfn = devfn;
 
         memory_region_init_iommu(&sdev->iommu, sizeof(sdev->iommu),
-                                 s->mrtypename,
-                                 OBJECT(s), name, UINT64_MAX);
-        address_space_init(&sdev->as,
-                           MEMORY_REGION(&sdev->iommu), name);
+                                 s->mrtypename, OBJECT(s), name, UINT64_MAX);
+        address_space_init(&sdev->as, MEMORY_REGION(&sdev->iommu), name);
         trace_smmu_add_mr(name);
         g_free(name);
     }
@@ -889,8 +917,14 @@ static const PCIIOMMUOps smmu_ops = {
 
 SMMUDevice *smmu_find_sdev(SMMUState *s, uint32_t sid)
 {
+    SMMUDevice *sdev = g_hash_table_lookup(s->smmu_devices_by_sid,
+                                           GUINT_TO_POINTER(sid));
     uint8_t bus_n, devfn;
     SMMUPciBus *smmu_bus;
+
+    if (sdev) {
+        return sdev;
+    }
 
     bus_n = PCI_BUS_NUM(sid);
     smmu_bus = smmu_find_smmu_pcibus(s, bus_n);
@@ -938,9 +972,12 @@ static void smmu_base_realize(DeviceState *dev, Error **errp)
     s->iotlb = g_hash_table_new_full(smmu_iotlb_key_hash, smmu_iotlb_key_equal,
                                      g_free, g_free);
     s->smmu_pcibus_by_busptr = g_hash_table_new(NULL, NULL);
+    s->smmu_devices_by_sid = g_hash_table_new(NULL, NULL);
 
     if (!pci_bus) {
-        error_setg(errp, "SMMU is not attached to any PCI bus!");
+        if (!s->system_bus_masters) {
+            error_setg(errp, "SMMU is not attached to any PCI bus!");
+        }
         return;
     }
 
@@ -992,6 +1029,8 @@ static void smmu_base_reset_exit(Object *obj, ResetType type)
 static const Property smmu_dev_properties[] = {
     DEFINE_PROP_UINT8("bus_num", SMMUState, bus_num, 0),
     DEFINE_PROP_BOOL("smmu_per_bus", SMMUState, smmu_per_bus, false),
+    DEFINE_PROP_BOOL("system-bus-masters", SMMUState, system_bus_masters,
+                     false),
     DEFINE_PROP_LINK("primary-bus", SMMUState, primary_bus,
                      TYPE_PCI_BUS, PCIBus *),
 };
@@ -1024,4 +1063,3 @@ static void smmu_base_register_types(void)
 }
 
 type_init(smmu_base_register_types)
-
