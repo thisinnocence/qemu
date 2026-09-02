@@ -849,10 +849,16 @@ SMMUPciBus *smmu_find_smmu_pcibus(SMMUState *s, uint8_t bus_num)
 
 /*
  * 为 system-bus master 查找或创建固定 SID 对应的 IOMMU AddressSpace
- * PCI master 仍由 smmu_find_add_as() 根据 bus 和 devfn 创建 AddressSpace
+ * 此接口不用于 PCI master，PCI 设备由 PCIIOMMUOps 单独处理
  */
 AddressSpace *smmu_get_address_space(SMMUState *s, uint32_t sid)
 {
+    /*
+     * IOMMU AddressSpace 表示该 SID 的 DMA 地址视图
+     * 设备访问 IOVA 时，SMMU 将其翻译为系统内存地址
+     * 同一 SID 复用同一地址视图
+     * 此表只保存 SID 与 AddressSpace 的对应关系
+     */
     SMMUDevice *sdev = g_hash_table_lookup(s->smmu_devices_by_sid,
                                            GUINT_TO_POINTER(sid));
     static unsigned int index;
