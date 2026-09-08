@@ -155,7 +155,7 @@ struct SMMUState {
     MemoryRegion iomem;
 
     GHashTable *smmu_pcibus_by_busptr;
-    GHashTable *smmu_devices_by_sid;
+    GHashTable *smmu_devices_by_sid; /* 自定义：本实例固定 SID 到 SMMUDevice 的映射，用于复用 DMA 地址空间 */
     GHashTable *configs; /* cache for configuration data */
     GHashTable *iotlb;
     SMMUPciBus *smmu_pcibus_by_bus_num[SMMU_PCI_BUS_MAX];
@@ -164,7 +164,7 @@ struct SMMUState {
     uint8_t bus_num;
     PCIBus *primary_bus;
     bool smmu_per_bus; /* SMMU is specific to the primary_bus */
-    bool system_bus_masters;
+    bool system_bus_masters; /* 自定义：允许片内 master 接入，无 primary-bus 也可完成设备初始化 */
 };
 
 struct SMMUBaseClass {

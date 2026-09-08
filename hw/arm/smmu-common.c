@@ -856,8 +856,9 @@ AddressSpace *smmu_get_address_space(SMMUState *s, uint32_t sid)
     /*
      * IOMMU AddressSpace 表示该 SID 的 DMA 地址视图
      * 设备访问 IOVA 时，SMMU 将其翻译为系统内存地址
-     * 同一 SID 复用同一地址视图
-     * 此表只保存 SID 与 AddressSpace 的对应关系
+     * SMMUDevice 表示一个 DMA stream 的持久接入上下文，不是 SMMUv3 控制器本身
+     * 此表按 SID 保存 SMMUDevice，其中包含 IOMMU 翻译入口和 DMA AddressSpace
+     * 查询命中时复用同一上下文，未命中时创建并入表；不同 VF 可对应不同上下文
      */
     SMMUDevice *sdev = g_hash_table_lookup(s->smmu_devices_by_sid,
                                            GUINT_TO_POINTER(sid));

@@ -28,13 +28,13 @@ static MemMapEntry memmap[] = {
     [VIRT_UART]       = { 0x09000000, 0x00001000 },
     [VIRT_GIC_DIST]   = { 0x08000000, 0x00010000 },
     [VIRT_GIC_REDIST] = { 0x080A0000, 0x00F60000 },
-    [VIRT_SEC]        = { 0x0A000000, 0x00000400 },
+    [VIRT_SEC]        = { 0x0A000000, SEC_MAX_VFS * SEC_VF_MMIO_SIZE },
     [VIRT_SMMU]       = { 0x0B000000, 0x00020000 },
 };
 
 static const int irqmap[] = {
     [VIRT_UART] = 1,
-    [VIRT_SEC] = 2,
+    [VIRT_SEC] = 8,
     [VIRT_SMMU] = 3,
 };
 
@@ -47,6 +47,7 @@ struct MiniVirtMachineState {
     MemMapEntry *memmap;
     const int *irqmap;
     DeviceState *gic;
+    DeviceState *smmu;
     MemoryRegion ram;
     struct arm_boot_info bootinfo;
 };
@@ -118,7 +119,7 @@ static void create_uart(const MiniVirtMachineState *vms, MemoryRegion *sysmem)
     sysbus_connect_irq(s, 0, qdev_get_gpio_in(vms->gic, irq));
 }
 
-static DeviceState *create_smmu(const MiniVirtMachineState *vms)
+static void create_smmu(MiniVirtMachineState *vms)
 {
     DeviceState *dev = qdev_new(TYPE_ARM_SMMUV3);
     SysBusDevice *s = SYS_BUS_DEVICE(dev);
@@ -131,26 +132,27 @@ static DeviceState *create_smmu(const MiniVirtMachineState *vms)
                            vms->irqmap[VIRT_SMMU] + i));
     }
 
-    return dev;
+    vms->smmu = dev;
 }
 
-static void create_sec(const MiniVirtMachineState *vms, DeviceState *smmu)
+static void create_sec(const MiniVirtMachineState *vms)
 {
-    /*
-     * qdev_get_gpio_in 获取 GIC 的 SPI 2 input sink
-     * SID 1 AddressSpace 使 sec DMA 通过 SMMUv3 Stage 1
-     * translation 访问 RAM
-     * level-high 的拉高和撤销仍由 sec register model 调用 qemu_set_irq 控制
-     */
     DeviceState *dev = qdev_new(TYPE_SEC_DEVICE);
     SysBusDevice *s = SYS_BUS_DEVICE(dev);
 
-    sec_set_dma_address_space(dev,
-        smmu_get_address_space(ARM_SMMU(smmu), 1));
+    qdev_prop_set_uint32(dev, "num-vfs", SEC_MAX_VFS);
+    for (unsigned i = 0; i < SEC_MAX_VFS; i++) {
+        /* machine 决定 VF 与 SID 的连线，guest 无法改写 SID */
+        sec_set_dma_address_space(dev, i, i + 1,
+            smmu_get_address_space(ARM_SMMU(vms->smmu), i + 1));
+    }
     sysbus_realize_and_unref(s, &error_fatal);
-    sysbus_mmio_map(s, 0, vms->memmap[VIRT_SEC].base);
-    sysbus_connect_irq(s, 0,
-                       qdev_get_gpio_in(vms->gic, vms->irqmap[VIRT_SEC]));
+    for (unsigned i = 0; i < SEC_MAX_VFS; i++) {
+        sysbus_mmio_map(s, i, vms->memmap[VIRT_SEC].base +
+                             i * SEC_VF_MMIO_SIZE);
+        sysbus_connect_irq(s, i,
+            qdev_get_gpio_in(vms->gic, vms->irqmap[VIRT_SEC] + i));
+    }
 }
 
 static const CPUArchIdList *virt_possible_cpu_arch_ids(MachineState *ms)
@@ -191,8 +193,8 @@ static void mach_virt_init(MachineState *machine)
     create_ram(vms, sysmem);
     create_gic(vms, sysmem);
     create_uart(vms, sysmem);
-    DeviceState *smmu = create_smmu(vms);
-    create_sec(vms, smmu);
+    create_smmu(vms);
+    create_sec(vms);
 
     vms->bootinfo.ram_size = machine->ram_size;
     vms->bootinfo.loader_start = vms->memmap[VIRT_MEM].base;

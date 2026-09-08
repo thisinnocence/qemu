@@ -1,5 +1,5 @@
 /*
- * 简单的 XOR 和 DMA MMIO 设备
+ * 包含独立 VF 的 XOR 和 DMA MMIO 设备
  *
  * PIO path 计算 XOR
  * DMA path 经 machine 提供的 AddressSpace 复制小块数据
@@ -7,6 +7,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qapi/error.h"
+#include "hw/qdev-properties.h"
 #include "qemu/module.h"
 #include "qom/object.h"
 #include "migration/vmstate.h"
@@ -15,7 +17,6 @@
 #include "hw/sysbus.h"
 #include "system/dma.h"
 
-#define SEC_MMIO_SIZE 0x400
 
 #define SEC_DATA1  0x00
 #define SEC_DATA2  0x04
@@ -29,14 +30,18 @@
 #define SEC_DMA_LEN 0x24
 #define SEC_DMA_CMD 0x28
 #define SEC_DMA_STATUS 0x2c
+#define SEC_VF_ID 0x30
+#define SEC_SID 0x34
+#define SEC_RESET 0x38
 
 #define SEC_IRQ_PENDING BIT(0)
 #define SEC_DMA_DONE BIT(0)
 #define SEC_DMA_ERROR BIT(1)
 #define SEC_DMA_MAX_LEN 256
 
-typedef struct SecState {
-    SysBusDevice parent_obj;
+typedef struct SecVF {
+    uint32_t id;
+    uint32_t sid;
     MemoryRegion mmio;
     qemu_irq irq;
     uint32_t data1;
@@ -50,16 +55,29 @@ typedef struct SecState {
     uint32_t dma_cmd;
     uint32_t dma_status;
     AddressSpace *dma_as;
+} SecVF;
+
+typedef struct SecState {
+    SysBusDevice parent_obj;
+    uint32_t num_vfs;
+    SecVF vf[SEC_MAX_VFS];
 } SecState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(SecState, SEC_DEVICE)
 
-void sec_set_dma_address_space(DeviceState *dev, AddressSpace *as)
+void sec_set_dma_address_space(DeviceState *dev, unsigned vf, uint32_t sid,
+                               AddressSpace *as)
 {
-    SEC_DEVICE(dev)->dma_as = as;
+    SecState *s = SEC_DEVICE(dev);
+
+    assert(!dev->realized && vf < SEC_MAX_VFS);
+    s->vf[vf].dma_as = as;
+    s->vf[vf].sid = sid;
 }
 
-static void sec_dma_copy(SecState *s)
+static void sec_vf_reset(SecVF *s);
+
+static void sec_dma_copy(SecVF *s)
 {
     g_autofree uint8_t *buf = NULL;
     MemTxResult result;
@@ -89,9 +107,13 @@ out:
 
 static uint64_t sec_read(void *opaque, hwaddr offset, unsigned size)
 {
-    SecState *s = opaque;
+    SecVF *s = opaque;
 
     switch (offset) {
+    case SEC_VF_ID:
+        return s->id;
+    case SEC_SID:
+        return s->sid;
     case SEC_DATA1:
         return s->data1;
     case SEC_DATA2:
@@ -125,7 +147,7 @@ static uint64_t sec_read(void *opaque, hwaddr offset, unsigned size)
 static void sec_write(void *opaque, hwaddr offset, uint64_t value,
                       unsigned size)
 {
-    SecState *s = opaque;
+    SecVF *s = opaque;
 
     switch (offset) {
     case SEC_DATA1:
@@ -144,9 +166,16 @@ static void sec_write(void *opaque, hwaddr offset, uint64_t value,
             s->result = 0;
         }
         break;
+    case SEC_RESET:
+        if (value == 1) {
+            sec_vf_reset(s);
+        }
+        break;
+    case SEC_VF_ID:
+    case SEC_SID:
     case SEC_RESULT:
-        /* RESULT 由设备更新，忽略软件写入 */
-        qemu_log_mask(LOG_GUEST_ERROR, "sec: RESULT is read-only\n");
+        /* 结果与身份寄存器由设备提供，忽略软件写入 */
+        qemu_log_mask(LOG_GUEST_ERROR, "sec: register is read-only\n");
         break;
     case SEC_IRQ_STATUS:
         /* bit 0 使用 W1C，清除后撤销 level-high 中断 */
@@ -178,7 +207,7 @@ static void sec_write(void *opaque, hwaddr offset, uint64_t value,
         s->dma_status &= ~value;
         break;
     default:
-        /* 1 KB 空间中的其余地址保留，忽略软件写入 */
+        /* 4 KB 空间中的其余地址保留，忽略软件写入 */
         break;
     }
 }
@@ -194,10 +223,8 @@ static const MemoryRegionOps sec_ops = {
     },
 };
 
-static void sec_reset(DeviceState *dev)
+static void sec_vf_reset(SecVF *s)
 {
-    SecState *s = SEC_DEVICE(dev);
-
     s->data1 = 0;
     s->data2 = 0;
     s->cmd = 0;
@@ -213,46 +240,93 @@ static void sec_reset(DeviceState *dev)
 
 static int sec_post_load(void *opaque, int version_id)
 {
-    SecState *s = opaque;
+    SecVF *s = opaque;
 
     qemu_set_irq(s->irq, !!s->irq_status);
     return 0;
 }
 
-static const VMStateDescription vmstate_sec = {
-    .name = TYPE_SEC_DEVICE,
-    .version_id = 3,
+static const VMStateDescription vmstate_sec_vf = {
+    .name = "sec/vf",
+    .version_id = 1,
     .minimum_version_id = 1,
     .post_load = sec_post_load,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT32(data1, SecState),
-        VMSTATE_UINT32(data2, SecState),
-        VMSTATE_UINT32(cmd, SecState),
-        VMSTATE_UINT32(result, SecState),
-        VMSTATE_UINT32_V(irq_status, SecState, 2),
-        VMSTATE_UINT64_V(dma_src, SecState, 3),
-        VMSTATE_UINT64_V(dma_dst, SecState, 3),
-        VMSTATE_UINT32_V(dma_len, SecState, 3),
-        VMSTATE_UINT32_V(dma_cmd, SecState, 3),
-        VMSTATE_UINT32_V(dma_status, SecState, 3),
+        VMSTATE_UINT32_EQUAL(id, SecVF, NULL),
+        VMSTATE_UINT32_EQUAL(sid, SecVF, NULL),
+        VMSTATE_UINT32(data1, SecVF),
+        VMSTATE_UINT32(data2, SecVF),
+        VMSTATE_UINT32(cmd, SecVF),
+        VMSTATE_UINT32(result, SecVF),
+        VMSTATE_UINT32(irq_status, SecVF),
+        VMSTATE_UINT64(dma_src, SecVF),
+        VMSTATE_UINT64(dma_dst, SecVF),
+        VMSTATE_UINT32(dma_len, SecVF),
+        VMSTATE_UINT32(dma_cmd, SecVF),
+        VMSTATE_UINT32(dma_status, SecVF),
         VMSTATE_END_OF_LIST()
     },
 };
 
-static void sec_init(Object *obj)
-{
-    SecState *s = SEC_DEVICE(obj);
+/* 多 VF 改变了板级硬件 ABI，不接受旧版单 VF migration stream */
+static const VMStateDescription vmstate_sec = {
+    .name = TYPE_SEC_DEVICE,
+    .version_id = 4,
+    .minimum_version_id = 4,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_EQUAL(num_vfs, SecState, NULL),
+        VMSTATE_STRUCT_ARRAY(vf, SecState, SEC_MAX_VFS, 4,
+                             vmstate_sec_vf, SecVF),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
-    memory_region_init_io(&s->mmio, obj, &sec_ops, s, TYPE_SEC_DEVICE,
-                          SEC_MMIO_SIZE);
-    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
-    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+static void sec_reset(DeviceState *dev)
+{
+    SecState *s = SEC_DEVICE(dev);
+
+    for (unsigned i = 0; i < s->num_vfs; i++) {
+        sec_vf_reset(&s->vf[i]);
+    }
 }
+
+static void sec_realize(DeviceState *dev, Error **errp)
+{
+    SecState *s = SEC_DEVICE(dev);
+
+    if (!s->num_vfs || s->num_vfs > SEC_MAX_VFS) {
+        error_setg(errp, "sec: num-vfs must be between 1 and %u", SEC_MAX_VFS);
+        return;
+    }
+    for (unsigned i = 0; i < s->num_vfs; i++) {
+        if (!s->vf[i].dma_as) {
+            error_setg(errp, "sec: VF %u has no DMA AddressSpace", i);
+            return;
+        }
+    }
+    for (unsigned i = 0; i < s->num_vfs; i++) {
+        SecVF *vf = &s->vf[i];
+        g_autofree char *name = g_strdup_printf("sec-vf%u", i);
+
+        vf->id = i;
+        memory_region_init_io(&vf->mmio, OBJECT(dev), &sec_ops, vf, name,
+                              SEC_VF_MMIO_SIZE);
+        sysbus_init_mmio(SYS_BUS_DEVICE(dev), &vf->mmio);
+        sysbus_init_irq(SYS_BUS_DEVICE(dev), &vf->irq);
+    }
+}
+
+static const Property sec_properties[] = {
+    DEFINE_PROP_UINT32("num-vfs", SecState, num_vfs, 4),
+};
 
 static void sec_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
+    dc->realize = sec_realize;
+    dc->user_creatable = false;
+    device_class_set_props(dc, sec_properties);
     dc->vmsd = &vmstate_sec;
     device_class_set_legacy_reset(dc, sec_reset);
 }
@@ -261,7 +335,6 @@ static const TypeInfo sec_info = {
     .name = TYPE_SEC_DEVICE,
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(SecState),
-    .instance_init = sec_init,
     .class_init = sec_class_init,
 };
 

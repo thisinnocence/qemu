@@ -6,6 +6,10 @@
 
 #define TYPE_SEC_DEVICE "sec"
 
-void sec_set_dma_address_space(DeviceState *dev, AddressSpace *as);
+#define SEC_MAX_VFS 4
+#define SEC_VF_MMIO_SIZE 0x1000
+
+void sec_set_dma_address_space(DeviceState *dev, unsigned vf, uint32_t sid,
+                               AddressSpace *as);
 
 #endif
