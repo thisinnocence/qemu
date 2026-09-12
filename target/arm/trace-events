@@ -24,5 +24,12 @@ arm_powerctl_set_cpu_on_and_reset(uint64_t mp_aff) "cpu %" PRIu64
 arm_powerctl_set_cpu_off(uint64_t mp_aff) "cpu %" PRIu64
 arm_powerctl_reset_cpu(uint64_t mp_aff) "cpu %" PRIu64
 
+arm_powerctl_cpu_off_queued(uint64_t mp_aff) "cpu %" PRIu64
+arm_powerctl_cpu_off_complete(uint64_t mp_aff, unsigned power_state, unsigned halted, int exception_index) "cpu %" PRIu64 " power_state=%u halted=%u exception_index=%d"
+arm_powerctl_cpu_on_complete(uint64_t mp_aff, unsigned power_state, unsigned halted, uint64_t pc) "cpu %" PRIu64 " power_state=%u halted=%u pc=0x%" PRIx64
+
 # tcg/psci.c and hvf/hvf.c
 arm_psci_call(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint32_t cpuid) "PSCI Call x0=0x%016"PRIx64" x1=0x%016"PRIx64" x2=0x%016"PRIx64" x3=0x%016"PRIx64" cpuid=0x%x"
+
+# tcg/psci.c
+arm_psci_return(uint64_t function_id, int32_t result, uint32_t cpuid) "function=0x%" PRIx64 " result=%" PRId32 " cpuid=0x%x"

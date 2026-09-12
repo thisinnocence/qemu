@@ -199,7 +199,8 @@ static void mach_virt_init(MachineState *machine)
     vms->bootinfo.ram_size = machine->ram_size;
     vms->bootinfo.loader_start = vms->memmap[VIRT_MEM].base;
     vms->bootinfo.skip_dtb_autoload = true;
-    vms->bootinfo.psci_conduit = QEMU_PSCI_CONDUIT_SMC; // for boot secondary cpu-core
+    /* 复用 ARM boot helper 的 PSCI 仿真，CPU0 direct boot，其余 CPU 等待 CPU_ON. */
+    vms->bootinfo.psci_conduit = QEMU_PSCI_CONDUIT_SMC;
 
     arm_load_kernel(ARM_CPU(first_cpu), machine, &vms->bootinfo); // load kernel
     vms->machine_done.notify = virt_machine_done; // load dtb

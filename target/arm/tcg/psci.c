@@ -211,6 +211,7 @@ void arm_handle_psci_call(ARMCPU *cpu)
     }
 
 err:
+    trace_arm_psci_return(param[0], ret, arm_cpu_mp_affinity(cpu));
     if (is_a64(env)) {
         env->xregs[0] = ret;
     } else {

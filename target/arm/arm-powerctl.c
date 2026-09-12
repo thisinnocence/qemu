@@ -79,6 +79,10 @@ static void arm_set_cpu_on_async_work(CPUState *target_cpu_state,
     /* Finally set the power status */
     assert(bql_locked());
     target_cpu->power_state = PSCI_ON;
+    trace_arm_powerctl_cpu_on_complete(arm_cpu_mp_affinity(target_cpu),
+                                      target_cpu->power_state,
+                                      target_cpu_state->halted,
+                                      target_cpu_state->cc->get_pc(target_cpu_state));
 }
 
 int arm_set_cpu_on(uint64_t cpuid, uint64_t entry, uint64_t context_id,
@@ -242,6 +246,10 @@ static void arm_set_cpu_off_async_work(CPUState *target_cpu_state,
     target_cpu->power_state = PSCI_OFF;
     target_cpu_state->halted = 1;
     target_cpu_state->exception_index = EXCP_HLT;
+    trace_arm_powerctl_cpu_off_complete(arm_cpu_mp_affinity(target_cpu),
+                                       target_cpu->power_state,
+                                       target_cpu_state->halted,
+                                       target_cpu_state->exception_index);
 }
 
 int arm_set_cpu_off(uint64_t cpuid)
@@ -269,6 +277,7 @@ int arm_set_cpu_off(uint64_t cpuid)
     /* Queue work to run under the target vCPUs context */
     async_run_on_cpu(target_cpu_state, arm_set_cpu_off_async_work,
                      RUN_ON_CPU_NULL);
+    trace_arm_powerctl_cpu_off_queued(cpuid);
 
     return QEMU_ARM_POWERCTL_RET_SUCCESS;
 }
